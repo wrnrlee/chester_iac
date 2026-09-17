@@ -4,7 +4,7 @@ Creates everything the GitHub deploy workflow needs before it can run, in
 project `my-user-project-308320`:
 
 - enables the required GCP APIs
-- the GCS bucket for the valheim stack's Terraform state
+- the GCS bucket holding Terraform state for the shared and server stacks
   (`my-user-project-308320-valheim-tfstate`)
 - the `valheim` Artifact Registry repo the workflow pushes images to
 - a Workload Identity pool/provider that only trusts GitHub Actions tokens

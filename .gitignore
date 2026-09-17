@@ -6,3 +6,9 @@ crash.log
 *.auto.tfvars
 __pycache__/
 my-user-project-308320-cff804bac79b.json
+
+# Written by `terramate generate` (CI runs it before every plan/apply)
+_generated_*.tf
+
+# CI plan output
+plans/
