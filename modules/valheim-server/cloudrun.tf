@@ -1,20 +1,17 @@
-# The Artifact Registry repo is created by stacks/bootstrap so CI can push
-# the image before this stack is applied.
-
 resource "google_cloud_run_v2_service" "start_trigger" {
-  name     = "${var.instance_name}-start-trigger"
+  name     = "${var.name}-start-trigger"
   project  = var.project_id
   location = var.region
 
   template {
-    service_account = google_service_account.start_trigger.email
+    service_account = google_service_account.trigger.email
 
     containers {
       image = var.trigger_image
 
       env {
         name  = "INSTANCE_NAME"
-        value = var.instance_name
+        value = google_compute_instance.server.name
       }
       env {
         name  = "ZONE"
@@ -34,16 +31,13 @@ resource "google_cloud_run_v2_service" "start_trigger" {
     }
   }
 
-  # Traffic is 100% to latest by default; kept explicit for clarity.
   traffic {
     type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
     percent = 100
   }
 }
 
-# Private by default: only the identities listed in
-# var.trigger_invoker_members can call this service. Left empty, nobody
-# but the project owner/editor can invoke it via IAM.
+# Private by default: only var.trigger_invoker_members can call it.
 resource "google_cloud_run_v2_service_iam_member" "invokers" {
   for_each = toset(var.trigger_invoker_members)
 

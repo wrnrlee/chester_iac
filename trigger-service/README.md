@@ -6,7 +6,7 @@ this repo (same pattern, simplified - no SSH step needed since the
 instance's own startup-script starts the Valheim container automatically).
 
 The `INSTANCE_NAME` and `ZONE` environment variables are set by Terraform
-(see `stacks/valheim/cloudrun.tf`) - nothing to configure by hand here.
+(see `modules/valheim-server/cloudrun.tf`) - nothing to configure by hand here.
 
 ## Build and push
 

@@ -6,11 +6,12 @@ on:
   pull_request:
     branches: [main, master]
     paths:
-      - "stacks/valheim/**"
+      - "stacks/shared/**"
+      - "stacks/servers/**"
+      - "modules/**"
       - "trigger-service/**"
       - "terramate.tm.hcl"
-      - ".github/workflows/plan-valheim.yml"
-      - ".github/workflows/deploy-valheim.yml"
+      - ".github/**"
 
 concurrency:
   group: plan-valheim-${{ github.event.pull_request.number }}
@@ -25,6 +26,7 @@ env:
   PROJECT_ID: my-user-project-308320
   REGION: us-central1
   PLANNER_SA: github-planner@my-user-project-308320.iam.gserviceaccount.com
+  TF_STATE_BUCKET: my-user-project-308320-valheim-tfstate
   TF_IN_AUTOMATION: "true"
 
 jobs:
@@ -33,26 +35,24 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TF_VAR_project_id: my-user-project-308320
-      TF_VAR_region: us-central1
-      TF_VAR_zone: us-central1-a
-      TF_VAR_server_password: ${{ secrets.VALHEIM_SERVER_PASSWORD }}
+      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      TF_VAR_server_passwords: ${{ secrets.VALHEIM_SERVER_PASSWORDS }}
       TF_VAR_trigger_invoker_members: ${{ vars.TRIGGER_INVOKER_MEMBERS || '[]' }}
-      # The image deploy-valheim.yml would push; used only so the plan shows
-      # the Cloud Run change. (After merge the tag is the merge commit SHA.)
+      # The tag deploy-valheim.yml would push; only used so the plan shows
+      # the Cloud Run change (after merge the tag is the merge commit SHA).
       TF_VAR_trigger_image: us-central1-docker.pkg.dev/my-user-project-308320/valheim/trigger-service:${{ github.event.pull_request.head.sha }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # change detection compares against the base branch
 
       - name: Check required settings
-        env:
-          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-        run: |
-          missing=0
-          [ -n "$WIF_PROVIDER" ] || { echo "::error::Repository variable GCP_WIF_PROVIDER is not set (bootstrap output github_wif_provider)."; missing=1; }
-          [ -n "$TF_VAR_server_password" ] || { echo "::error::Secret VALHEIM_SERVER_PASSWORD is not set."; missing=1; }
-          exit $missing
+        run: bash .github/scripts/check-settings.sh
+
+      - name: Select stacks
+        id: select
+        run: bash .github/scripts/select-stacks.sh "origin/${{ github.base_ref }}"
 
       - name: Build trigger-service image (no push)
         run: docker build -t trigger-service:pr trigger-service
@@ -74,59 +74,29 @@ jobs:
       - name: Generate Terramate code
         run: terramate generate
 
-      - name: Terraform init
-        id: init
-        working-directory: stacks/valheim
-        # Creating a brand-new state file needs write access, which the
-        # read-only planner doesn't have. Until the first deploy from
-        # main/master has created it, plan against an empty local state
-        # instead - that is exactly what the first deploy will start from.
+      - name: Terraform plan (per stack)
         run: |
-          STATE="gs://my-user-project-308320-valheim-tfstate/valheim/default.tfstate"
-          if out=$(gcloud storage ls "$STATE" 2>&1); then
-            echo "fresh=false" >> "$GITHUB_OUTPUT"
-          elif echo "$out" | grep -q "matched no objects"; then
-            echo "::notice::No deployed state yet - planning against empty state. The first merge to main/master will create everything shown."
-            rm -f _generated_backend.tf
-            echo "fresh=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Could not check for remote state: $out"
-            exit 1
-          fi
-          terraform init -input=false
-
-      - name: Terraform validate
-        working-directory: stacks/valheim
-        run: terraform validate
-
-      - name: Terraform plan
-        id: plan
-        working-directory: stacks/valheim
-        # -lock=false: the planner can't write the state lock, and a plan
-        # never changes state anyway.
-        run: |
-          terraform plan -input=false -lock=false -no-color -out=tfplan
-          terraform show -no-color tfplan > plan.txt
-          {
-            echo "## Terraform plan (not applied)"
-            echo '```'
-            tail -c 60000 plan.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          terramate list ${{ steps.select.outputs.flags }}
+          terramate run ${{ steps.select.outputs.flags }} \
+            --disable-check-git-untracked --disable-check-git-uncommitted \
+            -- bash "$GITHUB_WORKSPACE/.github/scripts/stack.sh" plan
 
       - name: Comment plan on PR
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            let plan = fs.readFileSync('stacks/valheim/plan.txt', 'utf8');
-            if (plan.length > 60000) plan = '...(truncated)...\n' + plan.slice(-60000);
+            const dir = 'plans';
+            const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.md')).sort() : [];
+            let plans = files.map(f => fs.readFileSync(`${dir}/${f}`, 'utf8')).join('\n');
+            if (!plans) plans = '_No Valheim stacks are affected by this change._';
+            if (plans.length > 60000) plans = plans.slice(0, 60000) + '\n```\n...(truncated - see the run summary / logs)';
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Terraform plans (not applied)\n\n${plans}\n`);
+
             const marker = '<!-- valheim-plan -->';
-            const fresh = '${{ steps.init.outputs.fresh }}' === 'true';
             const body = `${marker}\n### Terraform plan for \`my-user-project-308320\`\n` +
-              `Commit ${context.payload.pull_request.head.sha.slice(0, 7)} - **not applied**; deploys after merge.\n` +
-              (fresh ? '> Nothing has been deployed yet, so this is planned against empty state.\n' : '') + '\n' +
-              '<details><summary>Show plan</summary>\n\n```\n' + plan + '\n```\n</details>';
+              `Commit ${context.payload.pull_request.head.sha.slice(0, 7)} - **not applied**; deploys after merge.\n\n` +
+              `<details><summary>Show plans (${files.length} stack${files.length === 1 ? '' : 's'})</summary>\n\n${plans}\n</details>`;
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });

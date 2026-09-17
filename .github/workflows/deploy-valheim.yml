@@ -6,14 +6,15 @@ on:
   push:
     branches: [main, master]
     paths:
-      - "stacks/valheim/**"
+      - "stacks/shared/**"
+      - "stacks/servers/**"
+      - "modules/**"
       - "trigger-service/**"
       - "terramate.tm.hcl"
-      - ".github/workflows/deploy-valheim.yml"
-  workflow_dispatch: # manual re-deploy; only allowed from main/master (checked below)
+      - ".github/**"
+  workflow_dispatch: # re-deploys every stack; only allowed from main/master
 
-# Merges deploy one at a time, in order. If several merges queue up, GitHub
-# keeps only the newest pending run - fine, since it contains all of them.
+# Merges deploy one at a time, in order.
 concurrency:
   group: deploy-valheim-my-user-project-308320
   cancel-in-progress: false
@@ -26,6 +27,7 @@ env:
   PROJECT_ID: my-user-project-308320
   REGION: us-central1
   DEPLOYER_SA: github-deployer@my-user-project-308320.iam.gserviceaccount.com
+  TF_STATE_BUCKET: my-user-project-308320-valheim-tfstate
   TF_IN_AUTOMATION: "true"
 
 jobs:
@@ -33,28 +35,25 @@ jobs:
     name: Build, plan and apply
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    # Add required reviewers to this environment in GitHub settings if you
-    # ever want a manual approval gate before apply.
     environment: production
 
     env:
-      TF_VAR_project_id: my-user-project-308320
-      TF_VAR_region: us-central1
-      TF_VAR_zone: us-central1-a
-      TF_VAR_server_password: ${{ secrets.VALHEIM_SERVER_PASSWORD }}
+      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      TF_VAR_server_passwords: ${{ secrets.VALHEIM_SERVER_PASSWORDS }}
       TF_VAR_trigger_invoker_members: ${{ vars.TRIGGER_INVOKER_MEMBERS || '[]' }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Check required settings
-        env:
-          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-        run: |
-          missing=0
-          [ -n "$WIF_PROVIDER" ] || { echo "::error::Repository variable GCP_WIF_PROVIDER is not set (bootstrap output github_wif_provider)."; missing=1; }
-          [ -n "$TF_VAR_server_password" ] || { echo "::error::Secret VALHEIM_SERVER_PASSWORD is not set."; missing=1; }
-          exit $missing
+        run: bash .github/scripts/check-settings.sh
+
+      - name: Select stacks
+        id: select
+        # Manual runs re-deploy everything; pushes deploy what changed.
+        run: bash .github/scripts/select-stacks.sh "${{ github.event_name == 'push' && github.event.before || '' }}"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -65,13 +64,12 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Build and push trigger-service image
-        id: image
         run: |
           IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/valheim/trigger-service:${GITHUB_SHA}"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           docker build -t "$IMAGE" trigger-service
           docker push "$IMAGE"
-          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "TF_VAR_trigger_image=$IMAGE" >> "$GITHUB_ENV"
 
       - uses: terramate-io/terramate-action@v2
 
@@ -82,37 +80,9 @@ jobs:
       - name: Generate Terramate code
         run: terramate generate
 
-      - name: Terraform init
-        working-directory: stacks/valheim
-        run: terraform init -input=false
-
-      - name: Terraform validate
-        working-directory: stacks/valheim
-        run: terraform validate
-
-      - name: Terraform plan
-        working-directory: stacks/valheim
-        env:
-          TF_VAR_trigger_image: ${{ steps.image.outputs.uri }}
+      - name: Terraform apply (per stack, shared first)
         run: |
-          terraform plan -input=false -out=tfplan
-          {
-            echo "## Terraform plan"
-            echo '```'
-            terraform show -no-color tfplan | tail -c 60000
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Terraform apply
-        working-directory: stacks/valheim
-        run: terraform apply -input=false -auto-approve tfplan
-
-      - name: Report outputs
-        working-directory: stacks/valheim
-        run: |
-          {
-            echo "## Deployed"
-            echo "- Server IP: \`$(terraform output -raw server_ip)\` (port 2456)"
-            echo "- Start trigger: $(terraform output -raw start_trigger_url)"
-            echo "- Backup bucket: \`$(terraform output -raw backup_bucket)\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          terramate list ${{ steps.select.outputs.flags }}
+          terramate run ${{ steps.select.outputs.flags }} \
+            --disable-check-git-untracked --disable-check-git-uncommitted \
+            -- bash "$GITHUB_WORKSPACE/.github/scripts/stack.sh" apply
