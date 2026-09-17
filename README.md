@@ -78,6 +78,42 @@ The stack uses the project's `default` VPC network. If your project doesn't
 have one, create it or change `network` in `stacks/valheim/network.tf` and
 `compute.tf`.
 
+## Importing an existing world
+
+A Valheim world is two files named after the world: `<World>.fwl` and
+`<World>.db`. On Windows they're in
+`%USERPROFILE%\AppData\LocalLow\IronGate\Valheim\worlds_local\`. If
+the world is saved to Steam Cloud, use **Manage saves** in the game to move
+it to local first.
+
+1. **Make the server load that world name.** Set the default of
+   `world_name` in `stacks/valheim/variables.tf` to your world's file name
+   (without the extension), then open a PR and merge it.
+2. **Upload and swap the files** (bash, from your PC; the server must be running):
+   ```bash
+   PROJECT_ID=my-user-project-308320
+   ZONE=us-central1-a
+   BUCKET=my-user-project-308320-valheim-backups
+   WORLD=MyWorld   # your world's file name, same as world_name
+   SRC="$HOME/AppData/LocalLow/IronGate/Valheim/worlds_local"
+
+   gcloud storage cp "$SRC/$WORLD.fwl" "$SRC/$WORLD.db" "gs://$BUCKET/worlds_local/"
+
+   gcloud compute instances start valheim-server --zone "$ZONE" --project "$PROJECT_ID"
+   gcloud compute ssh valheim-server --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "
+     sudo docker stop valheim
+     sudo rm -f /opt/valheim/config/worlds_local/$WORLD.*
+     sudo gcloud storage cp 'gs://$BUCKET/worlds_local/$WORLD.*' /opt/valheim/config/worlds_local/
+     sudo google_metadata_script_runner startup
+   "
+   ```
+   The last line re-runs the startup script, which restarts the server with
+   the current `world_name` and password.
+
+Do the swap on the VM, not just in the bucket. The server copies its own
+world to the bucket at every idle shutdown, which would overwrite an upload
+of the same name.
+
 ## Turning it back on
 
 Once idle for 30 minutes, the instance stops itself. To start it again:
