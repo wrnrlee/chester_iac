@@ -1,0 +1,5 @@
+# Scripts that run on the Linux VM must keep LF endings, even when the
+# repo is checked out on Windows (CRLF breaks bash and the embedded Python).
+*.sh      text eol=lf
+*.tftpl   text eol=lf
+*.py      text eol=lf

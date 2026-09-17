@@ -50,34 +50,42 @@ fi
 
 command -v python3 >/dev/null 2>&1 || apt-get install -y python3
 
-# --- restore world from GCS if this is a cold/empty disk ----------------
-if [ -z "$(ls -A "$WORLD_DIR" 2>/dev/null)" ]; then
-  log "local world dir empty, attempting restore from gs://$BACKUP_BUCKET/worlds_local"
-  gcloud storage rsync "gs://$BACKUP_BUCKET/worlds_local" "$WORLD_DIR" || log "no existing backup found, starting fresh world"
+# --- restore the configured world from GCS if it isn't on disk ----------
+# Covers a fresh disk, and switching world_name to a world you uploaded to
+# gs://<bucket>/worlds_local/.
+if [ ! -f "$WORLD_DIR/$WORLD_NAME.db" ]; then
+  log "world $WORLD_NAME not on disk, attempting restore from gs://$BACKUP_BUCKET/worlds_local"
+  gcloud storage cp "gs://$BACKUP_BUCKET/worlds_local/$WORLD_NAME.*" "$WORLD_DIR/" \
+    || log "no backup of $WORLD_NAME found, the server will generate a new world"
 fi
+
+# --- reset the idle clock ---------------------------------------------------
+# The idle-monitor's timestamp survives on the persistent disk. Without this,
+# a server started after an idle shutdown would look idle for hours and shut
+# down again at the first check, 5 minutes after boot.
+date +%s > /opt/valheim/last_active
 
 # --- fetch server password from Secret Manager ---------------------------
 SERVER_PASS=$(gcloud secrets versions access latest --secret="$PASSWORD_SECRET_ID" --project="$PROJECT_ID")
 
-# --- start (or restart) the Valheim container -----------------------------
-if docker inspect valheim >/dev/null 2>&1; then
-  log "valheim container already exists, ensuring it's running"
-  docker start valheim >/dev/null 2>&1 || true
-else
-  log "creating valheim container"
-  docker run -d \
-    --name valheim \
-    --restart unless-stopped \
-    -p 2456-2457:2456-2457/udp \
-    -v "$CONFIG_DIR:/config" \
-    -v "$DATA_DIR:/opt/valheim" \
-    -e SERVER_NAME="$SERVER_NAME" \
-    -e WORLD_NAME="$WORLD_NAME" \
-    -e SERVER_PASS="$SERVER_PASS" \
-    -e SERVER_PUBLIC="$SERVER_PUBLIC" \
-    -e BACKUPS=false \
-    lloesche/valheim-server-docker
-fi
+# --- (re)create the Valheim container ---------------------------------------
+# Recreated on every boot so changes to server/world name, public flag or
+# password (instance metadata / Secret Manager) take effect. World data
+# lives on the host volume, and the image is cached, so this is quick.
+docker rm -f valheim >/dev/null 2>&1 || true
+log "starting valheim container (world: $WORLD_NAME)"
+docker run -d \
+  --name valheim \
+  --restart unless-stopped \
+  -p 2456-2457:2456-2457/udp \
+  -v "$CONFIG_DIR:/config" \
+  -v "$DATA_DIR:/opt/valheim" \
+  -e SERVER_NAME="$SERVER_NAME" \
+  -e WORLD_NAME="$WORLD_NAME" \
+  -e SERVER_PASS="$SERVER_PASS" \
+  -e SERVER_PUBLIC="$SERVER_PUBLIC" \
+  -e BACKUPS=false \
+  lloesche/valheim-server-docker
 
 # --- install the idle-monitor ---------------------------------------------
 cat > /opt/valheim/idle-monitor.py << 'PYEOF'
