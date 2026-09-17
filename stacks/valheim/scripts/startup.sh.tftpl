@@ -1,0 +1,120 @@
+#!/bin/bash
+# Idempotent GCE startup-script for the Valheim server VM. Safe to re-run
+# on every boot (stop/start cycles re-run this) - heavy install steps are
+# skipped once the tools are already present on the (persistent) disk.
+set -euo pipefail
+
+log() { echo "[valheim-startup] $(date -u +%FT%TZ) $1"; }
+
+MDURL=http://metadata.google.internal/computeMetadata/v1/instance/attributes
+get_meta() { curl -sf -H "Metadata-Flavor: Google" "$MDURL/$1"; }
+
+PROJECT_ID=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/project/project-id)
+SERVER_NAME=$(get_meta server-name)
+WORLD_NAME=$(get_meta world-name)
+SERVER_PUBLIC=$(get_meta server-public)
+IDLE_TIMEOUT_MINUTES=$(get_meta idle-timeout-minutes)
+BACKUP_BUCKET=$(get_meta backup-bucket)
+PASSWORD_SECRET_ID=$(get_meta password-secret-id)
+
+CONFIG_DIR=/opt/valheim/config
+DATA_DIR=/opt/valheim/data
+WORLD_DIR=$CONFIG_DIR/worlds_local
+
+mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$WORLD_DIR"
+
+# --- idempotent installs -----------------------------------------------
+if ! command -v docker >/dev/null 2>&1; then
+  log "installing docker"
+  apt-get update -y
+  apt-get install -y ca-certificates curl gnupg
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  . /etc/os-release
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $VERSION_CODENAME stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io
+  systemctl enable --now docker
+fi
+
+if ! command -v gcloud >/dev/null 2>&1; then
+  log "installing google-cloud-cli"
+  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+    > /etc/apt/sources.list.d/google-cloud-sdk.list
+  apt-get update -y
+  apt-get install -y google-cloud-cli
+fi
+
+command -v python3 >/dev/null 2>&1 || apt-get install -y python3
+
+# --- restore world from GCS if this is a cold/empty disk ----------------
+if [ -z "$(ls -A "$WORLD_DIR" 2>/dev/null)" ]; then
+  log "local world dir empty, attempting restore from gs://$BACKUP_BUCKET/worlds_local"
+  gcloud storage rsync "gs://$BACKUP_BUCKET/worlds_local" "$WORLD_DIR" || log "no existing backup found, starting fresh world"
+fi
+
+# --- fetch server password from Secret Manager ---------------------------
+SERVER_PASS=$(gcloud secrets versions access latest --secret="$PASSWORD_SECRET_ID" --project="$PROJECT_ID")
+
+# --- start (or restart) the Valheim container -----------------------------
+if docker inspect valheim >/dev/null 2>&1; then
+  log "valheim container already exists, ensuring it's running"
+  docker start valheim >/dev/null 2>&1 || true
+else
+  log "creating valheim container"
+  docker run -d \
+    --name valheim \
+    --restart unless-stopped \
+    -p 2456-2457:2456-2457/udp \
+    -v "$CONFIG_DIR:/config" \
+    -v "$DATA_DIR:/opt/valheim" \
+    -e SERVER_NAME="$SERVER_NAME" \
+    -e WORLD_NAME="$WORLD_NAME" \
+    -e SERVER_PASS="$SERVER_PASS" \
+    -e SERVER_PUBLIC="$SERVER_PUBLIC" \
+    -e BACKUPS=false \
+    lloesche/valheim-server-docker
+fi
+
+# --- install the idle-monitor ---------------------------------------------
+cat > /opt/valheim/idle-monitor.py << 'PYEOF'
+${idle_monitor_py}
+PYEOF
+chmod +x /opt/valheim/idle-monitor.py
+
+cat > /etc/systemd/system/valheim-idle-monitor.service << UNITEOF
+[Unit]
+Description=Valheim idle monitor (checks player count, backs up + shuts down when idle)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=BACKUP_BUCKET=$BACKUP_BUCKET
+Environment=WORLD_DIR=$WORLD_DIR
+Environment=IDLE_TIMEOUT_MINUTES=$IDLE_TIMEOUT_MINUTES
+Environment=CONTAINER_NAME=valheim
+Environment=QUERY_PORT=2457
+ExecStart=/usr/bin/python3 /opt/valheim/idle-monitor.py
+UNITEOF
+
+cat > /etc/systemd/system/valheim-idle-monitor.timer << 'UNITEOF'
+[Unit]
+Description=Run the Valheim idle monitor every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+UNITEOF
+
+systemctl daemon-reload
+systemctl enable --now valheim-idle-monitor.timer
+
+log "startup script complete"
