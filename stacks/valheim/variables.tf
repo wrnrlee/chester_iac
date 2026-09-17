@@ -42,7 +42,7 @@ variable "server_name" {
 variable "world_name" {
   description = "Name of the Valheim world/save file."
   type        = string
-  default     = "ChesterWorld"
+  default     = "brotherskaraminkov"
 }
 
 variable "server_public" {
