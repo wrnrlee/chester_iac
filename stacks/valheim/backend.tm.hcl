@@ -4,7 +4,7 @@
 
 globals {
   # Set this to the `state_bucket_name` output from stacks/bootstrap.
-  state_bucket = "REPLACE_WITH_BOOTSTRAP_STATE_BUCKET"
+  state_bucket = "my-user-project-308320-valheim-tfstate"
 }
 
 generate_hcl "_generated_backend.tf" {

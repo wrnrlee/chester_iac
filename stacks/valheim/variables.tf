@@ -76,7 +76,7 @@ variable "ssh_source_ranges" {
 }
 
 variable "trigger_image" {
-  description = "Fully qualified container image URL for the Cloud Run start-trigger service (e.g. us-central1-docker.pkg.dev/<project>/valheim/trigger-service:latest). Build and push this from trigger-service/ before the first apply - see trigger-service/README.md."
+  description = "Fully qualified container image URL for the Cloud Run start-trigger service. Set automatically by the GitHub workflow, which builds and pushes trigger-service/ on every run."
   type        = string
 }
 

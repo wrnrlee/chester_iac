@@ -10,24 +10,16 @@ The `INSTANCE_NAME` and `ZONE` environment variables are set by Terraform
 
 ## Build and push
 
-Run this once before the first `terraform apply` of the `valheim` stack
-(the Cloud Run service needs an image to reference), and again any time
-you change `main.go`:
+You don't need to do this by hand: the GitHub workflow builds this image
+and pushes it to
+`us-central1-docker.pkg.dev/my-user-project-308320/valheim/trigger-service:<commit sha>`
+on every deploy, then passes that tag to Terraform. To build it locally anyway:
 
 ```sh
-cd trigger-service
-gcloud artifacts repositories create valheim \
-  --repository-format=docker \
-  --location=<region> \
-  --project=<project-id>   # one-time, or let Terraform's google_artifact_registry_repository create it first
-
-gcloud builds submit \
-  --tag <region>-docker.pkg.dev/<project-id>/valheim/trigger-service:latest \
-  --project=<project-id>
+gcloud builds submit trigger-service \
+  --tag us-central1-docker.pkg.dev/my-user-project-308320/valheim/trigger-service:manual \
+  --project my-user-project-308320
 ```
-
-Then set that image URL as `trigger_image` when applying the `valheim`
-stack.
 
 ## Who can call it
 
@@ -36,6 +28,5 @@ binding) - only the identities listed in the `trigger_invoker_members`
 Terraform variable can call it, e.g.:
 
 ```sh
-gcloud auth print-identity-token | \
-  curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" <cloud-run-url>
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" <cloud-run-url>
 ```

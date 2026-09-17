@@ -21,12 +21,15 @@ globals {
   # Edit these for your project (Terramate globals don't read shell/CI
   # env vars automatically - unlike `terraform apply`, which does pick up
   # TF_VAR_* env vars for the variables declared in variables.tf).
-  project_id = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+  project_id = "my-user-project-308320"
   region     = "us-central1"
   zone       = "us-central1-a"
 }
 
 generate_hcl "_generated_provider.tf" {
+  # bootstrap declares its own provider so it can be applied without Terramate.
+  condition = terramate.stack.name != "bootstrap"
+
   content {
     terraform {
       required_version = ">= 1.5.0"

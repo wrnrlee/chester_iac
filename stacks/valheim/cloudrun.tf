@@ -1,10 +1,5 @@
-resource "google_artifact_registry_repository" "valheim" {
-  project       = var.project_id
-  location      = var.region
-  repository_id = "valheim"
-  format        = "DOCKER"
-  description   = "Container images for the Valheim start-trigger Cloud Run service."
-}
+# The Artifact Registry repo is created by stacks/bootstrap so CI can push
+# the image before this stack is applied.
 
 resource "google_cloud_run_v2_service" "start_trigger" {
   name     = "${var.instance_name}-start-trigger"
@@ -44,8 +39,6 @@ resource "google_cloud_run_v2_service" "start_trigger" {
     type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
     percent = 100
   }
-
-  depends_on = [google_artifact_registry_repository.valheim]
 }
 
 # Private by default: only the identities listed in

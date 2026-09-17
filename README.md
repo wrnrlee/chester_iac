@@ -21,49 +21,62 @@ server on a single GCE VM, which:
 - `terramate.tm.hcl` / `stacks/*/*.tm.hcl` — Terramate config; generates
   each stack's `provider.tf` / `backend.tf` so they aren't hand-duplicated.
 
-## First-time setup
+## Deployment (GitHub Actions)
 
-1. **Enable the required GCP APIs** on your project (once):
+Deploys to GCP project **`my-user-project-308320`** only after code reaches
+`main`/`master`:
+
+| When                         | Workflow             | What happens |
+|------------------------------|----------------------|--------------|
+| Pull request into main/master | `plan-valheim.yml`   | Builds the trigger image (no push), runs a **read-only** `terraform plan`, posts it as a PR comment. Nothing changes in GCP. |
+| Merge / push to main/master  | `deploy-valheim.yml` | Pushes the image tagged with the commit SHA, then `terraform plan` + `apply`. |
+
+Both run only when `stacks/valheim/`, `trigger-service/`,
+`terramate.tm.hcl` or the workflows change. Deploys are serialized in merge
+order, and you can re-run one by hand from the Actions tab (main/master only).
+
+This is enforced in GCP, not just in the workflow files: the owner-level
+`github-deployer` account can only be used by runs on `refs/heads/main` or
+`refs/heads/master`. Pull requests use `github-planner`, which is read-only,
+so a PR can't change the project even if its workflow file is edited.
+Pull requests from forks get no secrets or GCP token, so they don't plan.
+
+Recommended: in GitHub, add a branch protection rule on `main` that requires
+the **Build check and plan** check to pass before merging.
+
+### One-time setup
+
+1. **Apply the bootstrap stack** from your own machine (needs `gcloud auth
+   application-default login` as a project owner). It enables the APIs and
+   creates the state bucket, Artifact Registry repo, and the deployer
+   identity - see `stacks/bootstrap/README.md`.
    ```sh
-   gcloud services enable \
-     compute.googleapis.com \
-     secretmanager.googleapis.com \
-     run.googleapis.com \
-     artifactregistry.googleapis.com \
-     cloudbuild.googleapis.com \
-     --project=<project-id>
-   ```
-
-2. **Bootstrap the Terraform state bucket** — see `stacks/bootstrap/README.md`.
-   Note the `state_bucket_name` output and edit
-   `stacks/valheim/backend.tm.hcl`, setting `global.state_bucket` to that
-   bucket name, before running `terramate generate`.
-
-3. **Build and push the trigger-service image** — see
-   `trigger-service/README.md`. You need the resulting image URL for the
-   `trigger_image` variable below.
-
-4. **Generate and apply the `valheim` stack**:
-   ```sh
-   terramate generate
-   cd stacks/valheim
+   cd stacks/bootstrap
    terraform init
-   terraform apply \
-     -var="project_id=<project-id>" \
-     -var="server_password=<a real password, 5+ chars>" \
-     -var="trigger_image=<image URL from step 3>" \
-     -var='trigger_invoker_members=["user:you@example.com"]'
+   terraform apply
    ```
+2. **Add these in GitHub** (repo Settings -> Secrets and variables -> Actions):
 
-   First boot takes a few minutes (installs Docker + the Cloud SDK, then
-   pulls the Valheim image). Check progress with:
+   | Type     | Name                      | Value                                                |
+   |----------|---------------------------|------------------------------------------------------|
+   | Variable | `GCP_WIF_PROVIDER`        | bootstrap output `github_wif_provider`               |
+   | Secret   | `VALHEIM_SERVER_PASSWORD` | the Valheim join password (5+ characters)            |
+   | Variable | `TRIGGER_INVOKER_MEMBERS` | optional, e.g. `["user:you@gmail.com"]`              |
+
+3. **Open a pull request** to review the plan, then **merge it**. The deploy
+   run creates everything; first boot of the VM takes a few minutes (Docker + Cloud SDK install, image pull):
    ```sh
-   gcloud compute ssh <instance_name output> --zone <zone> --tunnel-through-iap \
+   gcloud compute ssh valheim-server --zone us-central1-a --tunnel-through-iap \
+     --project my-user-project-308320 \
      --command "sudo journalctl -u google-startup-scripts -f"
    ```
 
-5. **Connect**: in Valheim, "join by IP" using the `server_ip` Terraform
-   output and port `2456`, with the password you set above.
+4. **Connect**: in Valheim, "join by IP" using the server IP from the run
+   summary, port `2456`, and your password.
+
+The stack uses the project's `default` VPC network. If your project doesn't
+have one, create it or change `network` in `stacks/valheim/network.tf` and
+`compute.tf`.
 
 ## Turning it back on
 

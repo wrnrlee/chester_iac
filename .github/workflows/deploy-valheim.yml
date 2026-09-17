@@ -1,0 +1,118 @@
+name: Deploy Valheim
+
+# Applies ONLY after code lands on main/master (a merged PR or a direct
+# push). Pull requests get a read-only plan from plan-valheim.yml instead.
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "stacks/valheim/**"
+      - "trigger-service/**"
+      - "terramate.tm.hcl"
+      - ".github/workflows/deploy-valheim.yml"
+  workflow_dispatch: # manual re-deploy; only allowed from main/master (checked below)
+
+# Merges deploy one at a time, in order. If several merges queue up, GitHub
+# keeps only the newest pending run - fine, since it contains all of them.
+concurrency:
+  group: deploy-valheim-my-user-project-308320
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # keyless Workload Identity Federation auth
+
+env:
+  PROJECT_ID: my-user-project-308320
+  REGION: us-central1
+  DEPLOYER_SA: github-deployer@my-user-project-308320.iam.gserviceaccount.com
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  deploy:
+    name: Build, plan and apply
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    # Add required reviewers to this environment in GitHub settings if you
+    # ever want a manual approval gate before apply.
+    environment: production
+
+    env:
+      TF_VAR_project_id: my-user-project-308320
+      TF_VAR_region: us-central1
+      TF_VAR_zone: us-central1-a
+      TF_VAR_server_password: ${{ secrets.VALHEIM_SERVER_PASSWORD }}
+      TF_VAR_trigger_invoker_members: ${{ vars.TRIGGER_INVOKER_MEMBERS || '[]' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required settings
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+        run: |
+          missing=0
+          [ -n "$WIF_PROVIDER" ] || { echo "::error::Repository variable GCP_WIF_PROVIDER is not set (bootstrap output github_wif_provider)."; missing=1; }
+          [ -n "$TF_VAR_server_password" ] || { echo "::error::Secret VALHEIM_SERVER_PASSWORD is not set."; missing=1; }
+          exit $missing
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push trigger-service image
+        id: image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/valheim/trigger-service:${GITHUB_SHA}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" trigger-service
+          docker push "$IMAGE"
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - uses: terramate-io/terramate-action@v2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Generate Terramate code
+        run: terramate generate
+
+      - name: Terraform init
+        working-directory: stacks/valheim
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        working-directory: stacks/valheim
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: stacks/valheim
+        env:
+          TF_VAR_trigger_image: ${{ steps.image.outputs.uri }}
+        run: |
+          terraform plan -input=false -out=tfplan
+          {
+            echo "## Terraform plan"
+            echo '```'
+            terraform show -no-color tfplan | tail -c 60000
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform apply
+        working-directory: stacks/valheim
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Report outputs
+        working-directory: stacks/valheim
+        run: |
+          {
+            echo "## Deployed"
+            echo "- Server IP: \`$(terraform output -raw server_ip)\` (port 2456)"
+            echo "- Start trigger: $(terraform output -raw start_trigger_url)"
+            echo "- Backup bucket: \`$(terraform output -raw backup_bucket)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
