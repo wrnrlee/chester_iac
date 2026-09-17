@@ -63,6 +63,8 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ env.PLANNER_SA }}
 
+      - uses: google-github-actions/setup-gcloud@v2
+
       - uses: terramate-io/terramate-action@v2
 
       - uses: hashicorp/setup-terraform@v3
@@ -73,8 +75,25 @@ jobs:
         run: terramate generate
 
       - name: Terraform init
+        id: init
         working-directory: stacks/valheim
-        run: terraform init -input=false
+        # Creating a brand-new state file needs write access, which the
+        # read-only planner doesn't have. Until the first deploy from
+        # main/master has created it, plan against an empty local state
+        # instead - that is exactly what the first deploy will start from.
+        run: |
+          STATE="gs://my-user-project-308320-valheim-tfstate/valheim/default.tfstate"
+          if out=$(gcloud storage ls "$STATE" 2>&1); then
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          elif echo "$out" | grep -q "matched no objects"; then
+            echo "::notice::No deployed state yet - planning against empty state. The first merge to main/master will create everything shown."
+            rm -f _generated_backend.tf
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not check for remote state: $out"
+            exit 1
+          fi
+          terraform init -input=false
 
       - name: Terraform validate
         working-directory: stacks/valheim
@@ -103,8 +122,10 @@ jobs:
             let plan = fs.readFileSync('stacks/valheim/plan.txt', 'utf8');
             if (plan.length > 60000) plan = '...(truncated)...\n' + plan.slice(-60000);
             const marker = '<!-- valheim-plan -->';
+            const fresh = '${{ steps.init.outputs.fresh }}' === 'true';
             const body = `${marker}\n### Terraform plan for \`my-user-project-308320\`\n` +
-              `Commit ${context.payload.pull_request.head.sha.slice(0, 7)} - **not applied**; deploys after merge.\n\n` +
+              `Commit ${context.payload.pull_request.head.sha.slice(0, 7)} - **not applied**; deploys after merge.\n` +
+              (fresh ? '> Nothing has been deployed yet, so this is planned against empty state.\n' : '') + '\n' +
               '<details><summary>Show plan</summary>\n\n```\n' + plan + '\n```\n</details>';
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
